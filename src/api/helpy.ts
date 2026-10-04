@@ -1,0 +1,427 @@
+const DEFAULT_API_BASE = 'https://admin.helpyapp.tech/api/v1'
+const TOKEN_KEY = 'helpy_session_token'
+const SESSION_KIND_KEY = 'helpy_session_kind'
+
+type RequestMethod = 'GET' | 'POST'
+type QueryValue = string | number | boolean | null | undefined
+
+export type HelpyEnvelope<T> = {
+  status: boolean
+  message: string
+  data: T
+  code: number
+  token?: string
+}
+
+export type HelpyCategory = {
+  category_id: number
+  name: string
+  name_ar: string
+  description: string | null
+  description_ar: string | null
+  category_image: string | null
+  category_image_url: string | null
+}
+
+export type HelpyBanner = {
+  banner_id: number
+  name: string
+  service_id: number | null
+  target_type: string | null
+  target_id: number | null
+  banner_images: unknown
+}
+
+export type HelpyRegion = {
+  id: number
+  name: string
+  name_ar: string
+}
+
+export type HelpyCity = HelpyRegion & {
+  state_id: number
+  state_code: string | null
+  country_id: number | null
+  country_code: string | null
+  latitude: string | null
+  longitude: string | null
+}
+
+export type HelpyService = Record<string, unknown> & {
+  service_vendor_mapp_id: number
+  category_id: number
+  service_id: number
+  name: string
+  name_ar: string
+  price: number | string
+  rating: number | string | null
+  service_image: string | null
+  service_image_small: string | null
+}
+
+export type HelpyProvider = Record<string, unknown> & {
+  id: number
+  name: string
+  name_ar: string
+  profile_photo: string | null
+  user_profile_image_url: string | null
+  vendor_profile_image_url: string | null
+  rateing: number | string | null
+  weekly_bookings_count: number | null
+  service_setup: unknown
+}
+
+export type Paginated<T> = {
+  total_records: number
+  page: number
+  limit: number
+  data: T[]
+}
+
+export type HelpyAvailabilitySlot = {
+  day: string
+  slot: string
+  date: string
+  isAvailable: boolean | number
+}
+
+export type HelpyAddressInput = {
+  title: string
+  address: string
+  stateId: number
+  cityId: number
+  buildingNumber?: string
+  zone?: string
+  street?: string
+  floor?: string
+  apartment?: string
+  landmark?: string
+  latitude?: number
+  longitude?: number
+  notes?: string
+}
+
+export class HelpyApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly response?: unknown,
+  ) {
+    super(message)
+    this.name = 'HelpyApiError'
+  }
+}
+
+const runtimeEnv = import.meta.env as Record<string, string | boolean | undefined>
+
+function readToken() {
+  if (typeof window === 'undefined') return null
+  return window.sessionStorage.getItem(TOKEN_KEY)
+}
+
+export function getHelpyAccessToken() {
+  return readToken()
+}
+
+export function hasHelpySession() {
+  return Boolean(readToken())
+}
+
+export function hasHelpyUserSession() {
+  return Boolean(readToken()) && window.sessionStorage.getItem(SESSION_KIND_KEY) === 'user'
+}
+
+function writeToken(token: string, kind: 'guest' | 'user') {
+  if (typeof window !== 'undefined') {
+    window.sessionStorage.setItem(TOKEN_KEY, token)
+    window.sessionStorage.setItem(SESSION_KIND_KEY, kind)
+  }
+}
+
+function toSearchParams(values: Record<string, QueryValue>) {
+  const params = new URLSearchParams()
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== null && value !== undefined) params.set(key, String(value))
+  })
+  return params
+}
+
+class HelpyApiClient {
+  private readonly baseUrl = String(runtimeEnv.VITE_HELPY_API_BASE || DEFAULT_API_BASE).replace(/\/$/, '')
+  private guestPromise: Promise<string> | null = null
+
+  private async request<T>(
+    path: string,
+    options: {
+      method?: RequestMethod
+      query?: Record<string, QueryValue>
+      form?: Record<string, QueryValue>
+      multipart?: Record<string, QueryValue>
+      authenticated?: boolean
+      coordinates?: { latitude: number; longitude: number }
+    } = {},
+  ): Promise<HelpyEnvelope<T>> {
+    const { method = 'GET', query, form, multipart, authenticated = true, coordinates } = options
+    const queryString = query ? `?${toSearchParams(query).toString()}` : ''
+    const headers = new Headers({
+      Accept: 'application/json',
+      language: 'en',
+      lan: String(coordinates?.latitude ?? 25.2854),
+      long: String(coordinates?.longitude ?? 51.5310),
+    })
+
+    if (authenticated) {
+      const token = readToken() || await this.ensureGuestSession()
+      headers.set('Authorization', `Bearer ${token}`)
+    } else {
+      // This matches the APK's guest bootstrap request.
+      headers.set('Authorization', 'Bearer')
+    }
+
+    let body: BodyInit | undefined
+    if (form) {
+      body = toSearchParams(form)
+      headers.set('Content-Type', 'application/x-www-form-urlencoded')
+    }
+    if (multipart) {
+      const multipartBody = new FormData()
+      Object.entries(multipart).forEach(([key, value]) => {
+        if (value !== null && value !== undefined) multipartBody.set(key, String(value))
+      })
+      body = multipartBody
+    }
+
+    const response = await fetch(`${this.baseUrl}/${path.replace(/^\//, '')}${queryString}`, {
+      method,
+      headers,
+      body,
+    })
+
+    const payload = await response.json().catch(() => null) as HelpyEnvelope<T> | null
+    if (!response.ok || !payload?.status) {
+      throw new HelpyApiError(payload?.message || `Helpy API request failed (${response.status})`, response.status, payload)
+    }
+    return payload
+  }
+
+  async ensureGuestSession() {
+    const existing = readToken()
+    if (existing) return existing
+    if (this.guestPromise) return this.guestPromise
+
+    this.guestPromise = this.request<Record<string, unknown>>('guest-user', { authenticated: false })
+      .then(response => {
+        if (!response.token) throw new HelpyApiError('Guest session response did not include a token', 200, response)
+        writeToken(response.token, 'guest')
+        return response.token
+      })
+      .finally(() => { this.guestPromise = null })
+
+    return this.guestPromise
+  }
+
+  clearSession() {
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.removeItem(TOKEN_KEY)
+      window.sessionStorage.removeItem(SESSION_KIND_KEY)
+    }
+  }
+
+  async getOtpType() {
+    return (await this.request<unknown>('get-otp-type')).data
+  }
+
+  async sendLoginOtp(email: string) {
+    return (await this.request<unknown>('otp-send', {
+      method: 'POST',
+      multipart: {
+        phone_number: '',
+        email,
+        user_type: 'user',
+        otp_type: 'email',
+        type: 'login',
+      },
+    })).data
+  }
+
+  async loginWithOtp(input: {
+    email: string
+    code: string
+    deviceId: string
+    deviceType: 'web' | 'android' | 'ios'
+    deviceToken?: string
+  }) {
+    const response = await this.request<Record<string, unknown>>('login', {
+      method: 'POST',
+      form: {
+        phone_number: '',
+        email: input.email,
+        user_type: 'user',
+        otp_type: 'email',
+        otp_code: input.code,
+        device_id: input.deviceId,
+        device_type: input.deviceType,
+        device_token: input.deviceToken || '',
+      },
+    })
+    if (!response.token) throw new HelpyApiError('Login response did not include a token', 200, response)
+    writeToken(response.token, 'user')
+    return response.data
+  }
+
+  async setLanguage(language = 'en') {
+    return (await this.request<unknown[]>('user-language', { method: 'POST', form: { language } })).data
+  }
+
+  async getBanners() {
+    return (await this.request<HelpyBanner[]>('get-banner-list')).data
+  }
+
+  async getCategories(categoryImageSize = '64_65') {
+    return (await this.request<HelpyCategory[]>('get-category-list', { query: { categoryImageSize } })).data
+  }
+
+  async getFeaturedServices(categoryId = 0) {
+    return (await this.request<HelpyService[]>('get-featured-services-List', { query: { category_id: categoryId } })).data
+  }
+
+  async getTopProviders() {
+    return (await this.request<HelpyProvider[]>('get-top-service-provider-list', {
+      query: { userImageSize: '100_100', serviceSetupImageSize: '164_164' },
+    })).data
+  }
+
+  async getServices(categoryId: number, page = 1, limit = 100) {
+    const values = { page, category_id: categoryId, service_id: 0, sort_by: 'recently_added', limit }
+    return (await this.request<Paginated<HelpyService>>('featured-services-List', {
+      method: 'POST', query: values, form: values,
+    })).data
+  }
+
+  async getVendorDetails(serviceVendorMapId: number) {
+    const values = { service_vendor_mapp_id: serviceVendorMapId, serviceSetupImageSize: '100_100', userImageSize: '100_100' }
+    return (await this.request<HelpyService>('vendor-details', { method: 'POST', query: values, form: values })).data
+  }
+
+  async getReviews(serviceVendorMapId: number, rating = 0) {
+    return (await this.request<unknown[]>('get-reviews-list', {
+      method: 'POST',
+      form: { service_vendor_mapp_id: serviceVendorMapId, rating, revieImageSize: '100_100', userImageSize: '100_100' },
+    })).data
+  }
+
+  async getVendorServices(vendorId: number, categoryId: number) {
+    const values = { vendor_id: vendorId, category_id: categoryId }
+    return (await this.request<HelpyService[]>('vendor-service-offered', {
+      method: 'POST', query: values, form: values,
+    })).data
+  }
+
+  async getVendorAvailability(vendorId: number, date: string) {
+    return (await this.request<HelpyAvailabilitySlot[]>('vendor-availability', {
+      method: 'POST', form: { vendor_id: vendorId, date },
+    })).data
+  }
+
+  async getStates() {
+    return (await this.request<HelpyRegion[]>('get-state')).data
+  }
+
+  async getCities(stateId: number) {
+    return (await this.request<HelpyCity[]>('get-city', { method: 'POST', form: { state_id: stateId } })).data
+  }
+
+  async getPolicy() {
+    return (await this.request<Record<string, string>>('policy')).data
+  }
+
+  async getUserProfile() {
+    return (await this.request<Record<string, unknown>>('get-user-profile')).data
+  }
+
+  async getNotifications() {
+    return (await this.request<unknown[]>('get-notification-history-list')).data
+  }
+
+  async markNotificationRead(notificationId: string | number) {
+    return (await this.request<unknown>('notification-mark-as-read', { method: 'POST', form: { notification_id: notificationId } })).data
+  }
+
+  async markAllNotificationsRead() {
+    return (await this.request<unknown>('notification-mark-all-as-read', { method: 'POST' })).data
+  }
+
+  async getUnseenOrderCount() {
+    return (await this.request<{ count: number }>('unseen-order-count')).data
+  }
+
+  async getBookings(status: 0 | 1 | 2) {
+    return (await this.request<unknown[]>('booking-list', {
+      query: { status, serviceSetupImageSize: '375_240', userImageSize: '100_100' },
+    })).data
+  }
+
+  async getBookingDetails(bookingId: string | number) {
+    return (await this.request<Record<string, unknown>>('get-booking-details', {
+      method: 'POST', form: { booking_id: bookingId },
+    })).data
+  }
+
+  async getWalletHistory() {
+    return (await this.request<unknown[]>('wallet-history')).data
+  }
+
+  async getAddresses() {
+    return (await this.request<unknown[]>('get-addresses')).data
+  }
+
+  async getFavorites() {
+    return (await this.request<unknown[]>('my-favorites', {
+      query: { serviceSetupImageSize: '50_50' },
+    })).data
+  }
+
+  async updateUserProfile(input: { name: string; email: string; phoneNumber: string; aboutMe?: string }) {
+    return (await this.request<Record<string, unknown>>('update-user-profile', {
+      method: 'POST',
+      multipart: {
+        name: input.name,
+        name_en: input.name,
+        email: input.email,
+        phone_number: input.phoneNumber,
+        about_me: input.aboutMe || '',
+      },
+    })).data
+  }
+
+  async storeAddress(input: HelpyAddressInput) {
+    return (await this.request<Record<string, unknown>>('store-address', {
+      method: 'POST',
+      multipart: {
+        title: input.title,
+        address: input.address,
+        address_en: input.address,
+        address_ar: input.address,
+        state_id: input.stateId,
+        city_id: input.cityId,
+        building: input.buildingNumber,
+        building_no: input.buildingNumber,
+        building_number: input.buildingNumber,
+        zone: input.zone,
+        zone_number: input.zone,
+        street: input.street,
+        street_name: input.street,
+        floor: input.floor || '',
+        flat: input.apartment || '',
+        apartment: input.apartment || '',
+        landmark: input.landmark || '',
+        latitude: input.latitude ?? 25.2854,
+        longitude: input.longitude ?? 51.5310,
+        notes: input.notes || '',
+        is_default: 0,
+      },
+    })).data
+  }
+}
+
+export const helpyApi = new HelpyApiClient()

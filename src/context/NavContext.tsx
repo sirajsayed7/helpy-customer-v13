@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, ReactNode } from 'react'
+import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
+import { hasHelpyUserSession } from '../api/helpy'
 
 export type Screen =
   | 'splash' | 'login' | 'verify' | 'home' | 'orders' | 'chat' | 'profile'
@@ -37,32 +38,70 @@ export interface BookedService {
 
 const Ctx = createContext<NavCtx>(null as any)
 
+const SCREENS: Screen[] = [
+  'splash', 'login', 'verify', 'home', 'orders', 'chat', 'profile', 'categories',
+  'location', 'service-detail', 'booking-confirm', 'booking-checkout', 'booking-success',
+  'glow-checkout', 'chat-thread', 'wallet', 'favorites', 'addresses', 'contact-us',
+  'terms', 'privacy', 'notifications', 'order-detail', 'category-services', 'deals',
+  'offers-events', 'providers', 'all-services', 'reviews'
+]
+
+const screenFromUrl = (): Screen => {
+  if (typeof window === 'undefined') return 'splash'
+  const candidate = window.location.hash.replace('#', '') as Screen
+  return SCREENS.includes(candidate) ? candidate : 'splash'
+}
+
+const updateUrl = (screen: Screen, replace = false) => {
+  if (typeof window === 'undefined') return
+  const url = `${window.location.pathname}${window.location.search}#${screen}`
+  window.history[replace ? 'replaceState' : 'pushState']({ screen }, '', url)
+}
+
 export function NavProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<NavState>({ screen: 'splash', history: [] })
+  const [state, setState] = useState<NavState>(() => ({ screen: screenFromUrl(), history: [] }))
   const [activeTab, setActiveTabState] = useState('home')
-  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [isLoggedIn, setIsLoggedIn] = useState(() => hasHelpyUserSession())
   const [bookedServices, setBookedServices] = useState<BookedService[]>([])
   const [pendingReview, setPendingReview] = useState<BookedService | null>(null)
 
-  const navigate = (screen: Screen, params?: any) =>
+  useEffect(() => {
+    const syncFromBrowser = () => {
+      const screen = screenFromUrl()
+      setState(current => screen === current.screen ? current : { screen, params: undefined, history: [] })
+    }
+    window.addEventListener('popstate', syncFromBrowser)
+    window.addEventListener('hashchange', syncFromBrowser)
+    return () => {
+      window.removeEventListener('popstate', syncFromBrowser)
+      window.removeEventListener('hashchange', syncFromBrowser)
+    }
+  }, [])
+
+  const navigate = (screen: Screen, params?: any) => {
     setState(s => ({ screen, params, history: [...s.history, { screen: s.screen, params: s.params }] }))
+    updateUrl(screen)
+  }
 
   const goBack = () =>
     setState(s => {
       const history = [...s.history]
       const prev = history.pop()
+      if (prev) updateUrl(prev.screen, true)
       return prev ? { screen: prev.screen, params: prev.params, history } : s
     })
 
   const setActiveTab = (t: string) => {
     setActiveTabState(t)
     setState({ screen: t as Screen, params: undefined, history: [] })
+    updateUrl(t as Screen)
   }
 
   const login = () => {
     setIsLoggedIn(true)
     setState({ screen: 'home', params: undefined, history: [] })
     setActiveTabState('home')
+    updateUrl('home')
   }
 
   const addBooking = (b: BookedService) => {

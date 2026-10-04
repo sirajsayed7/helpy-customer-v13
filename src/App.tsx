@@ -1,4 +1,5 @@
 import { NavProvider, useNav } from './context/NavContext'
+import { HelpyDataProvider } from './context/HelpyDataContext'
 import { BottomNav } from './components/shared'
 
 import LoginPage          from './pages/LoginPage'
@@ -70,5 +71,5 @@ function AppShell() {
 }
 
 export default function App() {
-  return <NavProvider><AppShell/></NavProvider>
+  return <NavProvider><HelpyDataProvider><AppShell/></HelpyDataProvider></NavProvider>
 }
